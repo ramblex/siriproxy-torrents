@@ -20,4 +20,5 @@ Gem::Specification.new do |s|
   # specify any dependencies here; for example:
   s.add_runtime_dependency 'hpricot'
   s.add_runtime_dependency 'multipart-post'
+  s.add_runtime_dependency 'mysql'
 end

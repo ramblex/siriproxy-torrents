@@ -3,6 +3,7 @@ require 'pp'
 require 'hpricot'
 require 'net/http'
 require 'net/http/post/multipart'
+require_relative './siriproxy_user'
 
 class SiriProxy::Plugin::Torrents < SiriProxy::Plugin
   # Siri passes small numbers as words.
@@ -10,17 +11,14 @@ class SiriProxy::Plugin::Torrents < SiriProxy::Plugin
   @@numbers = %w(zero one two three four five six seven eight nine ten)
 
   def initialize(config)
-    @torrentleech = {
-      login: config['torrentleech']['login'],
-      password: config['torrentleech']['password'],
-      http: Net::HTTP.new('torrentleech.org')
-    }
+    # TODO: Not sure where nickname actually comes from or when it gets set
+    @user = SiriProxyUser.new(config['nickname'])
+    report_no_account unless @user.valid?
+  end
 
-    @utorrent = {
-      host: config['utorrent']['host'],
-      login: config['utorrent']['login'],
-      password: config['utorrent']['password']
-    }
+  def report_no_account
+    say "I am unable to find your account. Please check your nickname in your contacts card"
+    # TODO: Raise something?
   end
 
   def get_cookies_from_response(response)
@@ -33,19 +31,19 @@ class SiriProxy::Plugin::Torrents < SiriProxy::Plugin
 
   def torrentleech_login
     request = Net::HTTP::Post.new '/user/account/login'
-    request.set_form_data({'username' => @torrentleech[:login], 'password' => @torrentleech[:password]})
-    response = @torrentleech[:http].request request
+    request.set_form_data({'username' => @user.torrentleech[:login], 'password' => @user.torrentleech[:password]})
+    response = @user.torrentleech[:http].request request
     cookies = get_cookies_from_response response
-    @torrentleech[:cookies] = cookies unless cookies.empty?
+    @user.torrentleech[:cookies] = cookies unless cookies.empty?
   end
 
   def torrentleech_search(query)
-    torrentleech_login if @torrentleech[:cookies].nil?
+    torrentleech_login if @user.torrentleech[:cookies].nil?
     request = Net::HTTP::Get.new "/torrents/browse/index/query/#{query}/order/desc/orderby/seeders"
-    request['Cookie'] = @torrentleech[:cookies]
-    response = @torrentleech[:http].request request
+    request['Cookie'] = @user.torrentleech[:cookies]
+    response = @user.torrentleech[:http].request request
     cookies = get_cookies_from_response response
-    @torrentleech[:cookies] = cookies unless cookies.empty?
+    @user.torrentleech[:cookies] = cookies unless cookies.empty?
     html = Hpricot(response.body)
     results = []
     (html/'table#torrenttable/tbody/tr').each do |row|
@@ -61,22 +59,22 @@ class SiriProxy::Plugin::Torrents < SiriProxy::Plugin
   end
 
   def utorrent_get_token
-    uri = URI("http://#{@utorrent[:host]}/gui/token.html?t=#{Time.now.to_i}")
+    uri = URI("http://#{@user.utorrent[:host]}/gui/token.html?t=#{Time.now.to_i}")
     request = Net::HTTP::Get.new uri.request_uri
-    request.basic_auth @utorrent[:login], @utorrent[:password]
+    request.basic_auth @user.utorrent[:login], @user.utorrent[:password]
 
     response = Net::HTTP.start uri.hostname, uri.port do |http|
       http.request request
     end
 
     cookies = get_cookies_from_response response
-    @utorrent[:cookies] = cookies unless cookies.empty?
+    @user.utorrent[:cookies] = cookies unless cookies.empty?
 
     (Hpricot(response.body) % 'div').inner_text
   end
 
   def say_results(start = 0)
-    @torrentleech[:results][start..start + 2].each_with_index do |result, i|
+    @user.torrentleech[:results][start..start + 2].each_with_index do |result, i|
       say "#{result[:title]} (#{result[:size]}, #{result[:seeders]} seeders, #{result[:leechers]} leechers)", spoken: "#{i}. #{result[:title]}"
     end
 
@@ -93,25 +91,25 @@ class SiriProxy::Plugin::Torrents < SiriProxy::Plugin
   end
 
   def start_download(id)
-    result = @torrentleech[:results][id]
+    result = @user.torrentleech[:results][id]
 
     request = Net::HTTP::Get.new result[:href]
-    request['Cookie'] = @torrentleech[:cookies]
-    response = @torrentleech[:http].request request
+    request['Cookie'] = @user.torrentleech[:cookies]
+    response = @user.torrentleech[:http].request request
 
     cookies = get_cookies_from_response response
-    @torrentleech[:cookies] = cookies unless cookies.empty?
+    @user.torrentleech[:cookies] = cookies unless cookies.empty?
 
-    @utorrent[:token] = utorrent_get_token if @utorrent[:token].nil?
+    @user.utorrent[:token] = utorrent_get_token if @user.utorrent[:token].nil?
 
-    uri = URI("http://#{@utorrent[:host]}/gui/")
-    params = {token: @utorrent[:token], action: 'add-file', download_dir: 0, path: ''}
+    uri = URI("http://#{@user.utorrent[:host]}/gui/")
+    params = {token: @user.utorrent[:token], action: 'add-file', download_dir: 0, path: ''}
     uri.query = URI.encode_www_form(params)
 
     file = UploadIO.new StringIO.new(response.body), 'application/octet-stream', result[:href].split('/').last
     request = Net::HTTP::Post::Multipart.new uri.request_uri, torrent_file: file
-    request.basic_auth @utorrent[:login], @utorrent[:password]
-    request['Cookie'] = @utorrent[:cookies]
+    request.basic_auth @user.utorrent[:login], @user.utorrent[:password]
+    request['Cookie'] = @user.utorrent[:cookies]
 
     response = Net::HTTP.start uri.hostname, uri.port do |http|
       http.request request
@@ -121,7 +119,7 @@ class SiriProxy::Plugin::Torrents < SiriProxy::Plugin
   end
 
   listen_for /download (.*)/i do |name|
-    @torrentleech[:results] = torrentleech_search name
+    @user.torrentleech[:results] = torrentleech_search name
     say_results
     request_completed
   end
